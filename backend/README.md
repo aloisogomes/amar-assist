@@ -13,13 +13,14 @@ Valores são persistidos em **centavos** (inteiro). A data usa `Y-m-d`. O tipo �
 | MySQL | 8.4 | Persistência (utf8mb4) |
 | Laravel Sanctum | 4 | Token Bearer (`auth:sanctum`) |
 | Laravel Reverb | 1.11 | WebSockets da importação |
-| Filas (`database`) | — | Job `ProcessFinanceImport` |
-| Redis | 7 | Cache do dashboard (`CACHE_STORE=redis`, TTL 10 min) |
-| Sessão (`database`) | — | Sessões Laravel |
+| Filas (`redis`) | — | Job `ProcessFinanceImport` |
+| Redis | 7 | Cache, filas e sessões (`phpredis`) |
+| Sessão (`redis`) | — | Sessões Laravel |
 | Maatwebsite Excel | 4 | Template e importação `.xlsx`/`.csv` |
 | Pest | 5 | Testes de feature |
 | Laravel Pint | 1.32 | Formatação PHP |
 | Laravel Boost | 2 | Ferramentas para agentes no Cursor |
+| Scramble | 0.13 | Documentação OpenAPI (`/docs/api`) |
 
 Arquitetura: **Controller → FormRequest → UseCase → Repository (contrato) → Eloquent**. Dados entram e saem por **DTOs** e **API Resources**.
 
@@ -51,6 +52,12 @@ Health da aplicação: `GET /up`.
 
 Broadcast (prefixo `api`, Sanctum): progresso e conclusão da importação.
 
+## Documentação OpenAPI
+
+A UI interativa (Scramble) fica em [http://localhost:8000/docs/api](http://localhost:8000/docs/api). O spec JSON está em `/docs/api.json`.
+
+As rotas autenticadas usam Bearer: faça login ou cadastro, copie o `token` e cole no Authorize da UI (`Authorization: Bearer {token}`). A documentação só é servida com `APP_ENV=local`.
+
 ## Estrutura
 
 ```text
@@ -74,26 +81,34 @@ app/
 
 O `FinanceRepositoryInterface` é ligado à implementação Eloquent no `AppServiceProvider`.
 
-## Cache Redis
+## Redis (cache, filas e sessões)
 
-O dashboard usa [`FinanceDashboardCache`](app/Support/FinanceDashboardCache.php) no store padrão (`CACHE_STORE=redis`).
+Cliente **phpredis**. No Docker, `REDIS_HOST=redis`; no host, `127.0.0.1:6379`.
 
-- `Cache::remember()` grava a série e os KPIs por período (`from`/`to`) com TTL de **600 s**
-- A chave inclui uma versão (`finances.dashboard.v{n}.{from}.{to}`)
-- Create, update, delete e import chamam `bump()`: incrementam `finances.dashboard.version` (`Cache::forever`) e as chaves antigas deixam de ser lidas
-- Cliente **phpredis**; conexão `cache` no Redis DB **1** (`REDIS_CACHE_DB`)
-- Sessão (`SESSION_DRIVER`) e fila (`QUEUE_CONNECTION`) continuam no **MySQL**
-- Pest força `CACHE_STORE=array` no `phpunit.xml` (não precisa de Redis nos testes)
+| Recurso | Variável | Redis DB |
+| --- | --- | --- |
+| Cache do dashboard | `CACHE_STORE=redis` | **1** (`REDIS_CACHE_DB`, conexão `cache`) |
+| Filas | `QUEUE_CONNECTION=redis` | **0** (`REDIS_DB`, conexão `default`) |
+| Sessões | `SESSION_DRIVER=redis` | **0** (`REDIS_DB`, conexão `default`) |
 
-No Docker, `REDIS_HOST=redis`. Fora do Docker, `REDIS_HOST=127.0.0.1` e o Redis precisa estar na porta **6379** (o Compose publica essa porta).
+Jobs falhos seguem em `failed_jobs` no MySQL.
+
+O dashboard usa [`FinanceDashboardCache`](app/Support/FinanceDashboardCache.php):
+
+- `Cache::remember()` grava série e KPIs por período com TTL de **600 s**
+- Chave versionada `finances.dashboard.v{n}.{from}.{to}`
+- Create, update, delete e import chamam `bump()` e invalidam o cache antigo
+
+Pest no `phpunit.xml`: `CACHE_STORE=array`, `QUEUE_CONNECTION=sync`, `SESSION_DRIVER=array`.
 
 ```bash
 php artisan cache:clear
+php artisan queue:work
 ```
 
 ## Testes
 
-Pest em `tests/Feature` (SQLite `:memory:`, cache `array`). Coverage principal: auth, CRUD, filtros, dashboard e importação.
+Pest em `tests/Feature` (SQLite `:memory:`, cache `array`, fila `sync`). Coverage principal: auth, CRUD, filtros, dashboard e importação.
 
 ```bash
 php artisan test
@@ -107,7 +122,7 @@ No Docker da raiz: `sh docker/ci.sh`.
 ```bash
 cp .env.example .env
 # ajuste DB_* para o MySQL
-# Redis em 127.0.0.1:6379 (CACHE_STORE=redis no .env.example)
+# Redis em 127.0.0.1:6379 (cache, filas e sessões no .env.example)
 composer install
 php artisan key:generate
 php artisan migrate
@@ -128,12 +143,13 @@ php artisan reverb:start
 | `APP_URL` | URL da API (`http://localhost:8000`) |
 | `DB_*` | MySQL (`amar_assist`) |
 | `CACHE_STORE` | `redis` (Pest: `array`) |
+| `QUEUE_CONNECTION` | `redis` (Pest: `sync`) |
+| `SESSION_DRIVER` | `redis` (Pest: `array`) |
 | `REDIS_CLIENT` | `phpredis` |
 | `REDIS_HOST` | `127.0.0.1` no host; `redis` no Docker |
 | `REDIS_PORT` | `6379` |
-| `REDIS_CACHE_DB` | `1` (store `cache`; o default usa DB `0`) |
-| `QUEUE_CONNECTION` | `database` |
-| `SESSION_DRIVER` | `database` |
+| `REDIS_DB` | `0` (filas e sessões) |
+| `REDIS_CACHE_DB` | `1` (cache) |
 | `BROADCAST_CONNECTION` | `reverb` |
 | `REVERB_APP_*` / `REVERB_HOST` / `REVERB_PORT` | Credenciais e bind do Reverb |
 
