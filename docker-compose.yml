@@ -1,0 +1,182 @@
+name: amar-assist
+
+x-backend-env: &backend-env
+  APP_NAME: Amar Assist
+  APP_ENV: local
+  APP_DEBUG: "true"
+  APP_URL: http://localhost:8000
+  DB_CONNECTION: mysql
+  DB_HOST: mysql
+  DB_PORT: "3306"
+  DB_DATABASE: amar_assist
+  DB_USERNAME: amar
+  DB_PASSWORD: secret
+  CACHE_STORE: redis
+  REDIS_CLIENT: phpredis
+  REDIS_HOST: redis
+  REDIS_PORT: "6379"
+  REDIS_PASSWORD: null
+  SESSION_DRIVER: database
+  QUEUE_CONNECTION: database
+  BROADCAST_CONNECTION: reverb
+  REVERB_APP_ID: "1001"
+  REVERB_APP_KEY: amarassist
+  REVERB_APP_SECRET: amarassist-secret
+  REVERB_HOST: localhost
+  REVERB_PORT: "8080"
+  REVERB_SCHEME: http
+  REVERB_SERVER_HOST: 0.0.0.0
+  REVERB_SERVER_PORT: "8080"
+
+services:
+  mysql:
+    image: mysql:8.4
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: amar_assist
+      MYSQL_USER: amar
+      MYSQL_PASSWORD: secret
+      MYSQL_ROOT_PASSWORD: secret
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-u", "root", "-psecret"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    restart: unless-stopped
+    working_dir: /var/www/html
+    environment:
+      <<: *backend-env
+      RUN_MIGRATIONS: "true"
+    volumes:
+      - ./backend:/var/www/html
+    ports:
+      - "8000:8000"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/up"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 40s
+
+  queue:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    restart: unless-stopped
+    working_dir: /var/www/html
+    environment:
+      <<: *backend-env
+    volumes:
+      - ./backend:/var/www/html
+    command: php artisan queue:work --sleep=1 --tries=3 --timeout=300
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  reverb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    restart: unless-stopped
+    working_dir: /var/www/html
+    environment:
+      <<: *backend-env
+    volumes:
+      - ./backend:/var/www/html
+    command: php artisan reverb:start --host=0.0.0.0 --port=8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      VITE_API_URL: ""
+      VITE_PROXY_TARGET: http://backend:8000
+      VITE_REVERB_APP_KEY: amarassist
+      VITE_REVERB_HOST: localhost
+      VITE_REVERB_PORT: "8080"
+      VITE_REVERB_SCHEME: http
+      CHOKIDAR_USEPOLLING: "true"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+  test-backend:
+    profiles: ["ci"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: backend
+    working_dir: /var/www/html
+    environment:
+      APP_ENV: testing
+      SKIP_DB_WAIT: "true"
+      RUN_MIGRATIONS: "false"
+    volumes:
+      - ./backend:/var/www/html
+    command: php artisan test --compact
+
+  test-frontend:
+    profiles: ["ci"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: frontend
+    working_dir: /app
+    environment:
+      CI: "true"
+    volumes:
+      - ./frontend:/app
+      - frontend_node_modules:/app/node_modules
+    command: npm run typecheck
+
+volumes:
+  mysql_data:
+  redis_data:
+  frontend_node_modules:
